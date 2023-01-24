@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Deploys a Lambda function to handle requests from API Gateway and pass them on to RDS Proxy
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+  NodeEnvironment:
+    Type: String
+    Default: development
+  AWSEnvironment:
+    Type: String
+    Default: staging
+
+Resources:
+  LambdaApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AppName}-lambda-api"
+      Description: "Lambda function to handle requests from API Gateway and pass them on to RDS Proxy."
+      PackageType: Image
+      ImageUri:
+        Fn::Join:
+          - ""
+          - - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:lambda-api"
+            - ":latest"
+      MemorySize: 1024
+      Timeout: 6
+      Environment:
+        Variables:
+          NODE_ENV: !Ref NodeEnvironment
+          CLOUD_ENV: !Ref AWSEnvironment
+          DATABASE_HOST:
+            Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:aurora-proxy-endpoint"
+          DATABASE_PORT:
+            Fn::Join:
+              - ""
+              - - "{{resolve:secretsmanager:"
+                - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:db-secrets"
+                - ":SecretString:port}}"
+          DATABASE_NAME:
+            Fn::Join:
+              - ""
+              - - "{{resolve:secretsmanager:"
+                - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:db-secrets"
+                - ":SecretString:dbname}}"
+          DATABASE_USER:
+            Fn::Join:
+              - ""
+              - - "{{resolve:secretsmanager:"
+                - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:db-secrets"
+                - ":SecretString:username}}"
+      Policies:
+        - AWSLambdaExecute
+        - !Ref LambdaRdsProxyAccessManagedPolicy
+        - !Ref LambdaLoggingManagedPolicy
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: "${AWS::Region}-${AppName}:app-sg"
+          - !ImportValue
+            Fn::Sub: "${AWS::Region}-${AppName}:lambda-api-sg"
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: "${AWS::Region}-${AppName}:app-private-subnet-a"
+          - !ImportValue
+            Fn::Sub: "${AWS::Region}-${AppName}:app-private-subnet-b"
+    Tags:
+      - Key: "Application"
+        Value: !Ref "AppName"
+      - Key: "Name"
+        Value:
+          Fn::Sub: "${AppName}-lamda-api"
+
+  LambdaRdsProxyAccessManagedPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: Allows access to RDS proxy and aurora db via IAM
+      ManagedPolicyName: LambdaRdsProxyAccessManagedPolicy
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - rds-db:connect
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - !Sub "arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:"
+                    - !Select [
+                        6,
+                        !Split [
+                          ":",
+                          Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:aurora-proxy-arn",
+                        ],
+                      ]
+                    - "/apiuser"
+              - Fn::Join:
+                  - ""
+                  - - !Sub "arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:db-proxy:"
+                    - !Select [
+                        6,
+                        !Split [
+                          ":",
+                          Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:aurora-proxy-arn",
+                        ],
+                      ]
+                    - "/*"
+
+  LambdaLoggingManagedPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: Allows lambda to log to CloudWatch
+      ManagedPolicyName: LambdaLoggingManagedPolicy
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+            Resource:
+              - Fn::Sub: "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${AppName}-lambda-api*:*"
+          - Effect: Allow
+            Action:
+              - "logs:PutLogEvents"
+            Resource:
+              - Fn::Sub: "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${AppName}-lambda-api*:*:*"
+
+Outputs:
+  ApiLambdaFunctionArn:
+    Description: Lambda Api function
+    Value: !GetAtt "LambdaApiFunction.Arn"
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:lambda-api-function-arn"

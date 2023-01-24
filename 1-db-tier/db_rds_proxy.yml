@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys an RDS proxy for the Aurora cluster
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+  ProxyName:
+    Type: String
+    Default: aurora-cluster
+
+Resources:
+  ProxySecretReaderRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Description: "Role for RDS Proxy"
+      ManagedPolicyArns:
+        - !Ref DbSecretsManagerManagedPolicy
+      Path: /
+      RoleName: ProxyDbSecretsAccessRole
+
+  DbSecretsManagerManagedPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: Allows access to secrets of db-tier
+      ManagedPolicyName: DbSecretsManagerManagedPolicy
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "secretsmanager:GetSecretValue"
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: "${AWS::Region}-${AppName}:db-secrets"
+
+  AuroraProxySecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${AWS::Region}-${AppName}:vpc"
+      GroupDescription: "Security group for the Aurora Proxy"
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-aurora-proxy-sg"
+
+  LambdaApiSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${AWS::Region}-${AppName}:vpc"
+      GroupDescription: "Security group for the lambda-api"
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-lambda-api-sg"
+
+  AuroraProxySecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AuroraProxySecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref LambdaApiSecurityGroup
+
+  AuroraProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DebugLogging: true
+      DBProxyName: !Ref ProxyName
+      EngineFamily: POSTGRESQL
+      IdleClientTimeout: 120
+      RequireTLS: true
+      RoleArn: !GetAtt ProxySecretReaderRole.Arn
+      Auth:
+        - AuthScheme: SECRETS
+          SecretArn:
+            Fn::ImportValue:
+              Fn::Sub: "${AWS::Region}-${AppName}:db-secrets"
+          IAMAuth: REQUIRED
+      VpcSubnetIds:
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:db-private-subnet-a"
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:db-private-subnet-b"
+      VpcSecurityGroupIds:
+        - !Ref AuroraProxySecurityGroup
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:db-sg"
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-rds-proxy"
+
+  AuroraProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref AuroraProxy
+      DBClusterIdentifiers:
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:aurora-cluster"
+      TargetGroupName: default
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 100
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+Outputs:
+  AuroraProxyEndpoint:
+    Description: "End-point for the Aurora Proxy"
+    Value: !GetAtt AuroraProxy.Endpoint
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:aurora-proxy-endpoint"
+  AuroraProxyArn:
+    Description: "Arn for the Aurora Proxy"
+    Value: !GetAtt AuroraProxy.DBProxyArn
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:aurora-proxy-arn"
+  AuroraProxySecurityGroup:
+    Description: "Id of the aurora-proxy security group"
+    Value:
+      Ref: "AuroraProxySecurityGroup"
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:aurora-proxy-sg"
+  LambdaApiSecurityGroup:
+    Description: "Id of the lambda-api security group"
+    Value:
+      Ref: "LambdaApiSecurityGroup"
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:lambda-api-sg"

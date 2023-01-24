@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys an API Gateway with a private end-point to ingest commands from App Runner
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+  Environment:
+    Type: String
+    Default: development
+
+Resources:
+  # Endpoint needed to make our API private
+  ApiGatewayVpcEndpoint:
+    Type: "AWS::EC2::VPCEndpoint"
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.execute-api"
+      PrivateDnsEnabled: true
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: "*"
+            Resource: "*"
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${AWS::Region}-${AppName}:vpc"
+      SubnetIds:
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:app-private-subnet-a"
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:app-private-subnet-b"
+      SecurityGroupIds:
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:app-sg"
+
+  # Specifiy that we want to create a private REST api
+  ApiGatewayRestApi:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Name: "api-gateway"
+      Description: "API gateway"
+      EndpointConfiguration:
+        Types:
+          - PRIVATE
+        VpcEndpointIds:
+          - !Ref ApiGatewayVpcEndpoint
+      Policy:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action:
+              - "execute-api:Invoke"
+            Resource: "execute-api:/*"
+          - Effect: Deny
+            Principal: "*"
+            Action:
+              - "execute-api:Invoke"
+            Resource: "execute-api:/*"
+            Condition:
+              StringNotEquals:
+                "aws:SourceVpce": !Ref ApiGatewayVpcEndpoint
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-api-gateway"
+
+  # Specify that authorization via Cognito is necesarry
+  Authorizer:
+    Type: "AWS::ApiGateway::Authorizer"
+    Properties:
+      Name: CognitoAuthorizer
+      Type: COGNITO_USER_POOLS
+      ProviderARNs:
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:cognito-userpool-arn"
+      IdentitySource: method.request.header.Authorization
+      RestApiId: !Ref ApiGatewayRestApi
+
+  # Specify that the API is a proxy
+  ProxyResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      RestApiId: !Ref ApiGatewayRestApi
+      PathPart: "{proxy+}"
+
+  # Specify that we want to capture any method
+  ApiGatewayRootMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !GetAtt Authorizer.AuthorizerId
+      HttpMethod: ANY
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        IntegrationResponses:
+          - StatusCode: 200
+        Uri: !Join
+          - ""
+          - - "arn:"
+            - !Ref "AWS::Partition"
+            - ":apigateway:"
+            - !Ref "AWS::Region"
+            - ":lambda:path/2015-03-31/functions/"
+            - Fn::ImportValue:
+                Fn::Sub: "${AWS::Region}-${AppName}:lambda-api-function-arn"
+            - /invocations
+      ResourceId: !Ref ProxyResource
+      RestApiId: !Ref ApiGatewayRestApi
+
+  # Create a role for API GW to assume so it can publish logs
+  ApiGatewayLogPublishingRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Description: "Role for API gateway to be able to publish logs"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+      Path: /
+      RoleName: ApiGatewayLogPublishingRole
+
+  # Connect the role to Api Gateway
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayLogPublishingRole.Arn
+
+  # Launch an API deployment
+  ApiGatewayDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    DependsOn:
+      - "ApiGatewayRootMethod"
+    Properties:
+      Description: Lambda API deployment
+      RestApiId: !Ref ApiGatewayRestApi
+
+  # Define log group for access logging
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/${AppName}/apigateway/access-log"
+      RetentionInDays: 7
+
+  # Set up the stage and configure logging
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: !Ref Environment
+      Description:
+        Fn::Sub: "${Environment} Stage"
+      RestApiId: !Ref ApiGatewayRestApi
+      DeploymentId: !Ref ApiGatewayDeployment
+      Variables:
+        Stack: !Ref Environment
+      CacheClusterEnabled: false
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: "*"
+          MetricsEnabled: true
+          DataTraceEnabled: true
+          # Detailed logging (INFO) can be useful to troubleshoot
+          # but can result in logging sensitive data
+          LoggingLevel: INFO #LoggingLevel: ERROR
+          CachingEnabled: false
+          CacheTtlInSeconds: 10
+          ThrottlingRateLimit: 10000
+          ThrottlingBurstLimit: 5000
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId", "ip": "$context.identity.sourceIp",
+          "caller":"$context.identity.caller",
+          "user":"$context.identity.user","requestTime":"$context.requestTime",
+          "eventType":"$context.eventType","routeKey":"$context.routeKey",
+          "status":"$context.status","connectionId":"$context.connectionId"}
+
+  # Finally, connect our Lambda function
+  LambdaApiGatewayInvoke:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !ImportValue
+        Fn::Sub: "${AWS::Region}-${AppName}:lambda-api-function-arn"
+      Principal: "apigateway.amazonaws.com"
+      SourceArn:
+        Fn::Sub: "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/*"
+
+Outputs:
+  ServiceEndpoint:
+    Description: URL of the service endpoint
+    Value:
+      Fn::Sub: "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:api-gateway-endpoint"

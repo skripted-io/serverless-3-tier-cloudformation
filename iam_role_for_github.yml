@@ -1,0 +1,238 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Creates the role and permissions used by Github to be able to create stacks
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: "<YOUR_GITHUB_ACCOUNT>/*" ## the name of your GitHub repository allowed to deploy to AWS on your behalf
+
+  OIDCProviderArn:
+    Description: Arn for the GitHub OIDC Provider.
+    Default: arn:aws:iam::01234567890:oidc-provider/token.actions.githubusercontent.com # the arn generated after following readme.md of this repo
+    Type: String
+
+Conditions:
+  CreateOIDCProvider: !Equals
+    - !Ref OIDCProviderArn
+    - ""
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !If
+                - CreateOIDCProvider
+                - !Ref GithubOidc
+                - !Ref OIDCProviderArn
+            Condition:
+              ForAllValues:StringLike:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}
+
+  GithubOidc:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1 # https://github.blog/changelog/2022-01-13-github-actions-update-on-oidc-based-deployments-to-aws/
+
+  CloudformationPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CloudformationPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "cloudformation:*"
+            Resource: "*"
+          - Effect: Deny
+            Action: "cloudformation:DeleteStack"
+            Resource: "*"
+      Roles:
+        - !Ref Role
+
+  ECRDeployPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ECRDeployPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              [
+                "ecr:BatchGetImage",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:CompleteLayerUpload",
+                "ecr:CreateRepository",
+                "ecr:DescribeRepositories",
+                "ecr:GetAuthorizationToken",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:GetLifecyclePolicy",
+                "ecr:GetRepositoryPolicy",
+                "ecr:InitiateLayerUpload",
+                "ecr:ListTagsForResource",
+                "ecr:SetRepositoryPolicy",
+                "ecr:PutImage",
+                "ecr:UploadLayerPart",
+              ]
+            Resource: "*"
+      Roles:
+        - !Ref Role
+
+  CloudwatchLogPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CloudwatchLogPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              [
+                "logs:CreateLogStream",
+                "logs:DescribeLogStreams",
+                "logs:PutRetentionPolicy",
+                "logs:CreateLogGroup",
+                "logs:DeleteLogGroup",
+                "logs:TagResource",
+                "logs:UntagResource",
+                "logs:ListTagsForResource",
+              ]
+            Resource: "*"
+      Roles:
+        - !Ref Role
+
+  LambdaDeployPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaDeployPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              [
+                "lambda:AddPermission",
+                "lambda:CreateFunction",
+                "lambda:DeleteFunction",
+                "lambda:GetFunction",
+                "lambda:ListVersionsByFunction",
+                "lambda:PublishVersion",
+                "lambda:TagResource",
+                "lambda:InvokeFunction",
+                "lambda:UpdateFunctionCode",
+              ]
+            Resource: "*"
+      Roles:
+        - !Ref Role
+
+  EC2DeployPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: EC2DeployPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "*"
+            Resource: "*"
+      Roles:
+        - !Ref Role
+
+  IAMDeployPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: IAMDeployPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              [
+                "iam:AttachRolePolicy",
+                "iam:CreateRole",
+                "iam:CreateServiceLinkedRole",
+                "iam:DeleteRole",
+                "iam:DeleteRolePolicy",
+                "iam:DetachRolePolicy",
+                "iam:GetRole",
+                "iam:GetRolePolicy",
+                "iam:PassRole",
+                "iam:PutRolePolicy",
+              ]
+            Resource: "*"
+      Roles:
+        - !Ref Role
+
+  SecretsDeployPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: SecretsDeployPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              [
+                "kms:CreateGrant",
+                "kms:Decrypt",
+                "kms:DescribeKey",
+                "kms:Encrypt",
+                "kms:GenerateDataKey",
+                "sts:GetCallerIdentity",
+                "secretsmanager:GetRandomPassword",
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:UpdateSecret",
+              ]
+            Resource: "*"
+      Roles:
+        - !Ref Role
+
+  RDSDeployPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: RDSDeployPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              [
+                "rds:CreateDBCluster",
+                "rds:ModifyDBCluster",
+                "rds:DescribeDBClusters",
+                "rds:ModifyDBCluster",
+                "rds:CreateDBInstance",
+                "rds:ModifyDBInstance",
+                "rds:CreateDBSubnetGroup",
+                "rds:DescribeDBSubnetGroups",
+                "rds:AddTagsToResource",
+                "rds:ListTagsForResource",
+              ]
+            Resource: "*"
+      Roles:
+        - !Ref Role
+
+  ApiGatewayDeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ["apigateway:GET", "apigateway:PATCH"]
+            Resource: "*"
+
+Outputs:
+  Role:
+    Value: !GetAtt Role.Arn

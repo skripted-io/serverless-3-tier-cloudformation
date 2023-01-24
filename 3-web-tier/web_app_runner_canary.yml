@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys a Syntetic canary to do a periodic health check on our web facing app url
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+  AppDomain:
+    Type: String
+    Description: The url for the app
+  AlertEmail:
+    Type: String
+    Description: The email-address to send alerts to
+  PollingPeriod:
+    Type: String
+    Description: How often the test is performed
+    Default: rate(15 minutes)
+  AlarmPeriod:
+    Type: Number
+    Description: How often CloudWatch checks if the test was Okay (in seconds)
+    Default: 1800
+
+Resources:
+  CanaryResultsBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      LifecycleConfiguration:
+        Rules:
+          - Id: AutoDeletion
+            Prefix: autodelete
+            Status: Enabled
+            ExpirationInDays: 2
+
+  CanaryLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/${AppName}/canary"
+      RetentionInDays: 7
+
+  CanaryLambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref CanaryManagedPolicy
+      Path: /
+      RoleName: CanaryLambdaExecutionRole
+
+  CanaryManagedPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: Gives our Canary access to our LogGroup and Bucket
+      ManagedPolicyName: CanaryManagedPolicy
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "s3:ListAllMyBuckets"
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - "s3:PutObject"
+              - "s3:GetBucketLocation"
+            Resource: !Join
+              - "/"
+              - - !GetAtt CanaryResultsBucket.Arn
+                - "*"
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource:
+              - !GetAtt CanaryLogGroup.Arn
+          - Effect: Allow
+            Resource: "*"
+            Action: cloudwatch:PutMetricData
+            Condition:
+              StringEquals:
+                cloudwatch:namespace: CloudWatchSynthetics
+
+  SyntheticsCanary:
+    Type: "AWS::Synthetics::Canary"
+    Properties:
+      Name: app_canary
+      ExecutionRoleArn: !GetAtt CanaryLambdaExecutionRole.Arn
+      Code:
+        {
+          Handler: pageLoadBlueprint.handler,
+          Script: !Sub "var synthetics = require('Synthetics');\nconst log = require('SyntheticsLogger');\nconst pageLoadBlueprint = async function () {\n// INSERT URL here\nconst URL = \"https://${AppDomain}\";\n\nlet page = await synthetics.getPage();\nconst response = await page.goto(URL, {waitUntil: 'domcontentloaded', timeout: 30000});\n//Wait for page to render.\n//Increase or decrease wait time based on endpoint being monitored.\nawait page.waitFor(15000);\nawait synthetics.takeScreenshot('loaded', 'loaded');\nlet pageTitle = await page.title();\nlog.info('Page title: ' + pageTitle);\nif (response.status() !== 200) {\n throw \"Failed to load page!\";\n}\n};\n\nexports.handler = async () => {\nreturn await pageLoadBlueprint();\n};\n",
+        }
+      ArtifactS3Location:
+        Fn::Sub: "s3://${CanaryResultsBucket}"
+      RuntimeVersion: syn-nodejs-puppeteer-3.8
+      Schedule: { Expression: !Sub "${PollingPeriod}", DurationInSeconds: 0 }
+      RunConfig: { TimeoutInSeconds: 60 }
+      FailureRetentionPeriod: 30
+      SuccessRetentionPeriod: 30
+      Tags: [{ Key: key00AtCreate, Value: value001AtCreate }]
+      StartCanaryAfterCreation: true
+      DeleteLambdaResourcesOnCanaryDeletion: true
+
+  CanaryFailTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+      TopicName: "AppCanaryFail"
+
+  CanaryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Join
+        - " "
+        - - !Ref "AppDomain"
+          - "can not be reached."
+      MetricName: SuccessPercent
+      Namespace: CloudWatchSynthetics
+      Dimensions:
+        - Name: CanaryName
+          Value: app_canary
+      Period: !Ref AlarmPeriod
+      EvaluationPeriods: 1
+      Statistic: Average
+      ComparisonOperator: LessThanThreshold
+      Threshold: 100
+      TreatMissingData: breaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !GetAtt CanaryFailTopic.TopicArn
+      OKActions:
+        - !GetAtt CanaryFailTopic.TopicArn

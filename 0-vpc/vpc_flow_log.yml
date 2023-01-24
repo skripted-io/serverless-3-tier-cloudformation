@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys a flow log for the VPC
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+
+Resources:
+  FlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/${AppName}/vpc-flow-log"
+      RetentionInDays: 7
+
+  FlowLogPublishingRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: # prevent "confused deputy problem": https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html
+                aws:SourceAccount: !Sub "${AWS::AccountId}"
+      Description: "Role for flow logs"
+      ManagedPolicyArns:
+        - !Ref FlowLogManagedPolicy
+      Path: /
+      RoleName: FlowLogPublishingRole
+
+  FlowLogManagedPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: Allow flow log to publish to CloudWatch
+      ManagedPolicyName: FlowLogManagedPolicy
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+              - "logs:DescribeLogGroups"
+              - "logs:DescribeLogStreams"
+            Resource: !GetAtt FlowLogGroup.Arn
+
+  VpcFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceId:
+        Fn::ImportValue:
+          Fn::Sub: "${AWS::Region}-${AppName}:vpc"
+      DeliverLogsPermissionArn: !GetAtt FlowLogPublishingRole.Arn
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: vpc-flow-log
+      LogFormat: ${version} ${vpc-id} ${subnet-id} ${instance-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${tcp-flags} ${type} ${pkt-srcaddr} ${pkt-dstaddr}
+      TrafficType: REJECT

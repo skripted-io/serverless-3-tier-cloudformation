@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys a Cognito userpool for App Runner to connect to API Gateway
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+
+Resources:
+  CognitoUserPool:
+    Type: "AWS::Cognito::UserPool"
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: !Sub "${AppName}: temporary password"
+          EmailMessage: "Your username is {username} and temporary password is {####}."
+          SMSMessage: "Your username is {username} and temporary password is {####}."
+      AliasAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      UserPoolName:
+        Fn::Sub: "${AppName}-cognito-userpool"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: false
+          RequireNumbers: false
+          RequireSymbols: false
+          RequireUppercase: false
+          TemporaryPasswordValidityDays: 7
+
+  CognitoUserPoolClient:
+    Type: "AWS::Cognito::UserPoolClient"
+    Properties:
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthFlowsUserPoolClient: false
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+        - aws.cognito.signin.user.admin
+      ClientName:
+        Fn::Sub: "${AppName}-userpool-client"
+      CallbackURLs:
+        - "http://localhost"
+      ExplicitAuthFlows:
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      UserPoolId: !Ref CognitoUserPool
+
+Outputs:
+  CognitoUserPoolArn:
+    Description: Arn of the Cognito userpool
+    Value: !GetAtt CognitoUserPool.Arn
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:cognito-userpool-arn"
+  CognitoUserPoolId:
+    Description: The id of the Cognito userpool
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:cognito-userpool-id"
+  CognitoUserPoolClientId:
+    Description: The id of the Cognito userpool client
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:cognito-userpool-client-id"

@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys an App Runner service to run our main application
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+  NodeEnvironment:
+    Type: String
+    Default: development
+  AWSEnvironment:
+    Type: String
+    Default: staging
+  InstancePort:
+    Type: Number
+    Default: 80
+  InstanceCPU:
+    Type: String
+    Default: "1 vCPU"
+  InstanceMemory:
+    Type: String
+    Default: "2 GB"
+
+Resources:
+  AppRunnerECRAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM Role for App Runner to be able to pull our ECR image
+      AssumeRolePolicyDocument:
+        Version: "2008-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: build.apprunner.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess
+      Path: /
+      RoleName: AppRunnerECRAccessRole
+
+  AppRunnerInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM Role for App Runner container instance to access necesarry resources
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: tasks.apprunner.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref AppRunnerInstanceManagedPolicy
+        - arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess
+        # this second policy is only needed if you want your app to display an image version.
+
+  AppRunnerInstanceManagedPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: Custom managed policy for our App Runner instance role to get access to secrets
+      ManagedPolicyName: AppRunnerInstanceManagedPolicy
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "secretsmanager:GetSecretValue"
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: "${AWS::Region}-${AppName}:web-secrets"
+          - Effect: Allow
+            Action:
+              - "dynamodb:*"
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: "${AWS::Region}-${AppName}:dynamodb-session-table-arn"
+
+  DynamoDbGatewayEndpoint:
+    Type: "AWS::EC2::VPCEndpoint"
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Deny
+            Principal: "*"
+            Action: "*"
+            Resource: "*"
+            Condition:
+              ArnNotEquals:
+                "aws:PrincipalArn": !GetAtt AppRunnerInstanceRole.Arn
+          - Effect: Allow
+            Principal: "*"
+            Action: "dynamodb:*"
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: "${AWS::Region}-${AppName}:dynamodb-session-table-arn"
+      ServiceName:
+        Fn::Sub: "com.amazonaws.${AWS::Region}.dynamodb"
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${AWS::Region}-${AppName}:vpc"
+      RouteTableIds:
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:private-route-table-a"
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:private-route-table-b"
+
+  AppRunnerVPCConnector:
+    Type: AWS::AppRunner::VpcConnector
+    Properties:
+      SecurityGroups:
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:app-sg"
+      Subnets:
+        - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:app-private-subnet-a"
+        - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:app-private-subnet-b"
+
+  AppRunnerService:
+    Type: AWS::AppRunner::Service
+    Properties:
+      ServiceName: !Sub "${AppName}-${NodeEnvironment}"
+      SourceConfiguration:
+        AuthenticationConfiguration:
+          AccessRoleArn: !GetAtt AppRunnerECRAccessRole.Arn
+        AutoDeploymentsEnabled: true
+        ImageRepository:
+          ImageIdentifier:
+            Fn::Join:
+              - ""
+              - - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:apprunner-main"
+                - ":latest"
+          ImageRepositoryType: ECR
+          ImageConfiguration:
+            Port: !Ref InstancePort
+            RuntimeEnvironmentVariables:
+              - Name: NODE_ENV
+                Value: !Ref NodeEnvironment
+              - Name: SHOPIFY_ENV
+                Value: !Ref AWSEnvironment
+              - Name: MAIN_SECRETS_ARN
+                Value:
+                  Fn::ImportValue:
+                    Fn::Sub: "${AWS::Region}-${AppName}:web-secrets"
+      InstanceConfiguration:
+        Cpu: !Ref InstanceCPU
+        Memory: !Ref InstanceMemory
+        InstanceRoleArn: !GetAtt AppRunnerInstanceRole.Arn
+      NetworkConfiguration:
+        EgressConfiguration:
+          EgressType: VPC
+          VpcConnectorArn: !Ref AppRunnerVPCConnector
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-app-runner"

@@ -1,0 +1,171 @@
+name: "Deploy to staging stack AWS CloudFormation"
+
+on:
+  push:
+    branches:
+      - "staging"
+
+env:
+  AWS_ROLE: arn:aws:iam::01234567810:role/iam-role-for-github-0123456789
+  AWS_REGION: us-east-1
+  APP_NAME: shopify
+  NODE_ENVIRONMENT: development # the stage of your (node) app. Generally either development or production
+  AWS_ENVIRONMENT: staging # the stage of your AWS environment. I.e. testing, staging, production
+  APP_DOMAIN: staging.your-domain.com # change to your domain
+  ALERT_EMAIL: <your_email>
+  VPC_CIDR_BLOCK: 10.0.0.0/16
+  SUBNET_0: 10.0.0.0/24
+  SUBNET_1: 10.0.1.0/24
+  SUBNET_2: 10.0.2.0/24
+  SUBNET_3: 10.0.3.0/24
+  SUBNET_4: 10.0.4.0/24
+  SUBNET_5: 10.0.5.0/24
+  PROVISION_HA: true # When set to false, you save cost by deploying only 1 NAT, 1 EIP and one 1 DB Instance. Subnets will be deployed b/c of dependencies.
+
+jobs:
+  # This workflow contains a single job called "deploy"
+  deploy:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # These permissions are needed to interact with GitHub's OIDC Token endpoint.
+    permissions:
+      id-token: write
+      contents: read
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Checkout code from master branch
+        uses: actions/checkout@v2
+
+      # Configure AWS Credential
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Deploy VPC
+      - name: Deploys a 3-tier VPC with two Managed NATs, two public subnets and four private subnets
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-vpc
+          template: ./0-vpc/vpc.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }},ProvisionHA=${{ env.PROVISION_HA }},VpcCidrBlock=${{ env.VPC_CIDR_BLOCK }},Subnet0=${{ env.SUBNET_0 }},Subnet1=${{ env.SUBNET_1 }},Subnet2=${{ env.SUBNET_2 }},Subnet3=${{ env.SUBNET_3 }},Subnet4=${{ env.SUBNET_4 }},Subnet5=${{ env.SUBNET_5 }}
+
+      # Deploy flow log for the VPC
+      - name: Deploys a flow log for the VPC
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-vpc-flow-log
+          template: ./0-vpc/vpc_flow_log.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }}
+          capabilities: "CAPABILITY_NAMED_IAM"
+
+      # Configure ECR repositories
+      - name: Configure two ECR repositories for storing the Lambda and App Runner containers.
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-ecr-repositories
+          template: ./0-vpc/ecr_repositories.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }}
+
+      # Deploy db secrets
+      - name: Deploys a SecretManager for the db-tier
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-db-secrets
+          template: ./1-db-tier/db_secrets.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }}
+
+      # Deploy aurora cluster
+      - name: Deploys an Aurora ServerlessV2 Cluster with a writer instance and replica in a seperate AZ
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-db-aurora-cluster
+          template: ./1-db-tier/db_aurora_cluster.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }},ProvisionHA=${{ env.PROVISION_HA }}
+          capabilities: "CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+
+      # Deploy RDS proxy
+      - name: Deploys an RDS proxy for the Aurora cluster
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-db-rds-proxy
+          template: ./1-db-tier/db_rds_proxy.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }}
+          capabilities: "CAPABILITY_NAMED_IAM"
+
+      # Deploy DynamoDB
+      - name: Deploys a DynamoDB table with VPC Gateway Endpoint to store sessions
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-db-dynamodb-table
+          template: ./1-db-tier/db_dynamodb_table.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }}
+
+      # Deploy a Cognito userpool for App Runner to connect to API Gateway
+      - name: Deploys a Cognito userpool for App Runner to connect to API Gateway
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-cognito-userpool
+          template: ./2-app-tier/app_cognito_userpool.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }}
+
+      # Deploy Lambda API function
+      - name: Deploys a Lambda function to handle requests from API Gateway and pass them on to RDS Proxy
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-app-lambda-api
+          template: ./2-app-tier/app_lambda_api.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }},NodeEnvironment=${{ env.NODE_ENVIRONMENT }},AWSEnvironment=${{ env.AWS_ENVIRONMENT }}
+          capabilities: "CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+
+      # Deploy API Gateway
+      - name: Deploys an API Gateway with a private enpoint to ingest commands from our main App Runner
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-app-api-gateway
+          template: ./2-app-tier/app_api_gateway.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }},Environment=${{ env.NODE_ENVIRONMENT }}
+          capabilities: "CAPABILITY_NAMED_IAM"
+
+      # Deploy web secrets
+      - name: Deploys a SecretManager for the web-tier
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-web-secrets
+          template: ./3-web-tier/web_secrets.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }},NodeEnvironment=${{ env.NODE_ENVIRONMENT }},AWSEnvironment=${{ env.AWS_ENVIRONMENT }},AppDomain=${{ env.APP_DOMAIN }}
+
+      # Deploy our main application
+      - name: Deploys an App Runner service to run our main application
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-web-app-runner
+          template: ./3-web-tier/web_app_runner_service.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }},NodeEnvironment=${{ env.NODE_ENVIRONMENT }},AWSEnvironment=${{ env.AWS_ENVIRONMENT }}
+          capabilities: "CAPABILITY_NAMED_IAM"
+
+      # Deploy a Syntetic canary
+      - name: Deploys a Syntetic canary to do a periodic health check on our web facing app url
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ env.APP_NAME }}-app-canary
+          template: ./3-web-tier/web_app_runner_canary.yml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: AppName=${{ env.APP_NAME }},AppDomain=${{ env.APP_DOMAIN }},AlertEmail=${{ env.ALERT_EMAIL }}
+          capabilities: "CAPABILITY_NAMED_IAM"

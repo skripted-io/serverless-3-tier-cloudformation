@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys a DynamoDB table with VPC Gateway Endpoint to store sessions
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+
+Resources:
+  DynamoDbSessionTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "SessionId"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "SessionId"
+          KeyType: "HASH"
+      BillingMode: PAY_PER_REQUEST
+      TableName: "SessionTable"
+      TableClass: STANDARD_INFREQUENT_ACCESS
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-dynamodb"
+
+Outputs:
+  DynamoDbSessionTableArn:
+    Description: "Arn for the DynamoDB SessionTable"
+    Value: !GetAtt DynamoDbSessionTable.Arn
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:dynamodb-session-table-arn"

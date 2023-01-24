@@ -1,0 +1,172 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::SecretsManager-2020-07-23"
+Description: Deploys an Aurora ServerlessV2 Cluster with a writer instance and replica in a separate AZs
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+  ProvisionHA:
+    Type: String
+    Default: false
+  EngineVersion:
+    Type: String
+    Default: 14.5
+  MinCapacity:
+    Type: String
+    Default: 0.5
+  MaxCapacity:
+    Type: String
+    Default: 1
+  InstaneAZ1:
+    Type: String
+    Default: us-east-1a
+  InstaneAZ2:
+    Type: String
+    Default: us-east-1b
+
+Conditions:
+  ProvisionHA: !Equals
+    - !Ref ProvisionHA
+    - true
+
+Resources:
+  DbSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupName: "db-subnetgroup"
+      DBSubnetGroupDescription: "Db Subnet Group"
+      SubnetIds:
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:db-private-subnet-a"
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:db-private-subnet-b"
+
+  AuroraCluster:
+    Type: "AWS::RDS::DBCluster"
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DeletionProtection: false
+      StorageEncrypted: true
+      BackupRetentionPeriod: 30
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      Port: 5432
+      DBClusterIdentifier:
+        Fn::Sub: "${AppName}-aurora-cluster"
+      DBSubnetGroupName: !Ref "DbSubnetGroup"
+      DatabaseName:
+        Fn::Join:
+          - ""
+          - - "{{resolve:secretsmanager:"
+            - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:db-secrets"
+            - ":SecretString:dbname}}"
+      MasterUsername:
+        Fn::Join:
+          - ""
+          - - "{{resolve:secretsmanager:"
+            - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:db-secrets"
+            - ":SecretString:username}}"
+      MasterUserPassword:
+        Fn::Join:
+          - ""
+          - - "{{resolve:secretsmanager:"
+            - Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:db-secrets"
+            - ":SecretString:password}}"
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: !Ref MinCapacity
+        MaxCapacity: !Ref MaxCapacity
+      VpcSecurityGroupIds:
+        - Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:db-sg"
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-aurora-cluster"
+
+  AuroraInstanceA:
+    Type: "AWS::RDS::DBInstance"
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      EnablePerformanceInsights: true
+      DBInstanceIdentifier:
+        Fn::Sub: "${AppName}-aurora-instance-a"
+      DBInstanceClass: db.serverless
+      DBClusterIdentifier: !Ref AuroraCluster
+      AvailabilityZone: !Ref InstaneAZ1
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-aurora-instance-a"
+
+  AuroraInstanceB:
+    Type: "AWS::RDS::DBInstance"
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Condition: ProvisionHA
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      EnablePerformanceInsights: true
+      DBInstanceIdentifier:
+        Fn::Sub: "${AppName}-aurora-instance-b"
+      DBInstanceClass: db.serverless
+      DBClusterIdentifier: !Ref AuroraCluster
+      AvailabilityZone: !Ref InstaneAZ2
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-aurora-instance-b"
+
+  # Completes the final link between a Secrets Manager secret and the
+  # associated database by adding the database connection information to the secret JSON
+  SecretRDSInstanceAttachment:
+    Type: "AWS::SecretsManager::SecretTargetAttachment"
+    Properties:
+      SecretId:
+        Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:db-secrets"
+      TargetId: !Ref AuroraCluster
+      TargetType: AWS::RDS::DBCluster
+
+  # Deploys automatic rotation of the secrets
+  MySecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: SecretRDSInstanceAttachment
+    Properties:
+      SecretId:
+        Fn::ImportValue: !Sub "${AWS::Region}-${AppName}:db-secrets"
+      HostedRotationLambda:
+        RotationType: PostgreSQLSingleUser
+        RotationLambdaName: SecretsManagerRotation
+        VpcSecurityGroupIds:
+          Fn::ImportValue:
+            Fn::Sub: "${AWS::Region}-${AppName}:db-sg"
+        VpcSubnetIds:
+          Fn::Join:
+            - ","
+            - - Fn::ImportValue:
+                  Fn::Sub: "${AWS::Region}-${AppName}:db-private-subnet-a"
+              - Fn::ImportValue:
+                  Fn::Sub: "${AWS::Region}-${AppName}:db-private-subnet-b"
+      RotationRules:
+        Duration: 2h
+        ScheduleExpression: "cron(0 4 ? * SUN#1 *)"
+      RotateImmediatelyOnUpdate: false
+
+Outputs:
+  AuroraCluster:
+    Description: "Id for the Aurora cluster"
+    Value:
+      Ref: "AuroraCluster"
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:aurora-cluster"

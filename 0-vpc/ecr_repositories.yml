@@ -1,0 +1,83 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Configure two ECR repositories for storing the Lambda and AppRunner containers
+
+Parameters:
+  AppName:
+    Type: String
+    Default: shopify
+
+Resources:
+  LambdaApiRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName:
+        Fn::Sub: "${AppName}/lambda-api"
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {
+             "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire images older than 1 day",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                  },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-lambda-api-repo"
+
+  AppRunnerMainRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName:
+        Fn::Sub: "${AppName}/apprunner-main"
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {
+             "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire images older than 1 day",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                  },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: "Application"
+          Value: !Ref "AppName"
+        - Key: "Name"
+          Value:
+            Fn::Sub: "${AppName}-app-runner-main-repo"
+
+Outputs:
+  LambdaApiRepo:
+    Description: URI of the Lambda API repo
+    Value: !GetAtt LambdaApiRepo.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:lambda-api"
+
+  AppRunnerMainRepo:
+    Description: URI of the App Runner Main repo
+    Value: !GetAtt AppRunnerMainRepo.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::Region}-${AppName}:apprunner-main"
